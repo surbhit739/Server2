@@ -77,6 +77,12 @@ io.on('connection', (socket) => {
     if (receiverSocketId) {
       io.to(receiverSocketId).emit("callForwardingRequest", message);
       console.log(`Call forwarding to ${receiverId}: ${message}`);
+      socket.emit("forwardingStatus", {
+        status: "DELIVERED",
+        message: message,
+        receiverId: receiverId,
+        timestamp: Date.now()
+      });
     } else {
       socket.emit("forwardingStatus", {
         status: "FAILED",
