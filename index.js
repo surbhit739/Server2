@@ -94,7 +94,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on("callForwardingStatu", (res) => {
+  socket.on("callForwardingStatus", (res) => {
     console.log(res)
   });
 
